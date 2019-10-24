@@ -73,9 +73,13 @@ def _svd_regress(x, y, alpha=0.):
         Uty /= len(y)
     else:
         Uty = U.T @ y
-    Vsreg = V.T @ np.diag(s/(s**2 + alpha))
-    betas = Vsreg @ Uty
-    return betas
+
+    if np.size(alpha) == 1:
+        Vsreg = V.T @ np.diag(s/(s**2 + alpha))
+        betas = Vsreg @ Uty
+        return betas
+    else:
+        return [V.T @ np.diag(s/(s**2 + al)) @ Uty for al in alpha]
 
 class TRFEstimator(BaseEstimator):
     """Temporal Response Function (TRF) Estimator Class.
@@ -145,7 +149,11 @@ class TRFEstimator(BaseEstimator):
         self.tmax = tmax
         self.srate = srate
         self.alpha = alpha
-        self.use_regularisation = alpha > 0.
+        if isinstance(alpha, float):
+            self.use_regularisation = alpha > 0.
+        else: # list
+            assert len(alpha) >= 1, "use alpha=0. for no regularization"
+            self.use_regularisation = True
         self.fit_intercept = fit_intercept
         self.fitted = False
         # All following attributes are only defined once fitted (hence the "_" suffix)
@@ -236,6 +244,10 @@ class TRFEstimator(BaseEstimator):
         if self.use_regularisation or np.ndim(y) == 3:
             # svd method:
             betas = _svd_regress(X, y, self.alpha)
+            if np.size(self.alpha) != 1:
+                self.coef_ = betas
+                self.fitted = True
+                return self
         else:
             betas, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
 
