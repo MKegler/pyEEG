@@ -21,12 +21,12 @@ import logging
 import numpy as np
 from scipy import stats
 from sklearn.model_selection import KFold
-logging.getLogger('matplotlib').setLevel(logging.WARNING)
 import matplotlib.pyplot as plt
 from mne.decoding import BaseEstimator
 from .utils import lag_matrix, lag_span, lag_sparse, mem_check
 from .vizu import get_spatial_colors
 
+logging.getLogger('matplotlib').setLevel(logging.WARNING)
 logging.basicConfig(level=logging.WARNING)
 LOGGER = logging.getLogger(__name__.split('.')[0])
 
