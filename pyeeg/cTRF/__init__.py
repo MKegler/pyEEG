@@ -1,9 +1,8 @@
 """
-pyEEG package for analyzing EEG with speech and word-level features.
+cTRF module with helper functions for complex TRF modelling.
+To be rearranged and integrated into the main framework.
 
- import pyeeg.* and have fun decoding!
-
- 2019, Hugo Weissbart
+2020, Mikolaj Kegler
 """
 
 from . import cTRF, cTRF_utils

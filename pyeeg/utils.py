@@ -137,7 +137,7 @@ def lag_sparse(times, srate=125):
     """
     return np.asarray([int(np.ceil(t * srate)) for t in times])
 
-def signal_envelope(signal, srate, cutoff=20., method='hilbert', comp_factor=1./3, resample=125):
+def signal_envelope(signal, srate, cutoff=20., method='hilbert', comp_factor=1./3, resample=125, rescale=True):
     """Compute the broadband envelope of the input signal.
     Several methods are available:
 
@@ -207,7 +207,10 @@ def signal_envelope(signal, srate, cutoff=20., method='hilbert', comp_factor=1./
                 env = scisig.resample(out, new_n)
     
     # Scale output between 0 and 1:
-    return minmax_scale(env)
+    if rescale:
+        return minmax_scale(env)
+    else:
+        return env
 
 def fir_order(tbw, srate, atten=60, ripples=None):
     """Estimate FIR Type II filter order (order will be odd).

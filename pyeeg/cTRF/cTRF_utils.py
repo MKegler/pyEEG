@@ -47,28 +47,28 @@ def fast_hilbert(X, axis=0):
     X = signal.hilbert(X_padded, axis=axis)[:X.shape[0], :]
     return X
 
-def get_env(audio, bpf=[1, 10], resample=True, us=1, ds=480):
+def get_env(audio, bpf=[1, 10], resample=True, us=1, ds=480, order=1):
     '''
     Obtain speech envelope from analytical signal & filter
     '''
     env = np.abs(fast_hilbert(audio)) # Envelope extraciton
     env = np.squeeze(env)
     if len(bpf) > 1:
-        env = butter_bandpass_filter(env, bpf[0], bpf[1], 48000, 1) # Bandpass filtering (butterworth, zero-phase)
+        env = butter_bandpass_filter(env, bpf[0], bpf[1], 48000, order) # Bandpass filtering (butterworth, zero-phase)
     else:
-        env = butter_lowpass_filter(env, bpf[0], 48000, 1) # Lowpass filtering (butterworth, zero-phase)
+        env = butter_lowpass_filter(env, bpf[0], 48000, order) # Lowpass filtering (butterworth, zero-phase)
     if resample == True:
         env = signal.resample_poly(env, us, ds) # Downsample to 100 Hz
     return env
 
-def get_FW(audio, bpf=[100, 300], resample=True, us=1, ds=48):
+def get_FW(audio, bpf=[100, 300], resample=True, us=1, ds=48, order=1):
     '''
     Obtain fundamental waveform by filtering raw audio (100-300 default)
     '''
     if len(bpf) > 1:
-        FW = butter_bandpass_filter(audio, bpf[0], bpf[1], 48000, 1) # Bandpass filtering (butterworth, zero-phase)
+        FW = butter_bandpass_filter(audio, bpf[0], bpf[1], 48000, order) # Bandpass filtering (butterworth, zero-phase)
     else:
-        FW = butter_lowpass_filter(audio, bpf[0], 48000, 1) # Lowpass filtering (butterworth, zero-phase)
+        FW = butter_lowpass_filter(audio, bpf[0], 48000, order) # Lowpass filtering (butterworth, zero-phase)
     if resample == True:
         FW = signal.resample_poly(FW, us, ds) # Downsample to 1000 Hz
     return FW

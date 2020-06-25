@@ -34,8 +34,8 @@ def ridge_fit_SVD(XtX, XtY ,lambdas, forward=False):
     reshaped accordingly.
     '''
 
-    # Compute eigenvaluesa and eigenvectors of covariance matrix XtX
-    S, V = linalg.eigh(XtX, overwrite_a=True, turbo=True)
+    # Compute eigenvalues and eigenvectors of covariance matrix XtX
+    S, V = linalg.eigh(XtX, overwrite_a=False, turbo=True)
 
     # Sort the eigenvalues
     s_ind = np.argsort(S)[::-1]
@@ -108,6 +108,9 @@ def design_matrix(eeg, feat, tlag, cmplx=True, forward=False, normalize=True):
     else:
         tlag = np.array(tlag)*-1
 
+    # Indexing in Python goes from 0. (i.e. 100th element has index 99 etc.)
+    tlag = tlag - 1 # Double check that
+
     # Align Y, so that it is misaligned with eeg by tlag_width samples
     Y = feat[tlag[0]:tlag[1], :]
 
@@ -150,7 +153,7 @@ def get_cov_mat(eeg_list, feat_list, tlag, cmplx=True, forward=False, normalize=
     complex values. Otherwise False and coeff will be real-only.
     - forward model - boolean. True if forward model shall be built.
     False if backward.
-    - normalize - boolean. Zscore eeg and speech featrues? (Default: True)
+    - normalize - boolean. Zscore eeg and speech features? (Default: True)
     - n_sub - integer. Number of subjects to be used in training pooled models. 
     Required to compute normalization factors. (Default: 1 - subject-specific model)
     
