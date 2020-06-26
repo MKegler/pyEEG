@@ -6,10 +6,17 @@ Contact: mikolaj.kegler16@imperial.ac.uk
 '''
 
 import numpy as np
+from mne.decoding import BaseEstimator
 import scipy.linalg as linalg
 import scipy.stats as stats
 import scipy.signal as signal
 from . import cTRF_utils as utils
+
+class TRFEstimator():
+    '''
+    Base class
+    '''
+    pass
 
 def ridge_fit_SVD(XtX, XtY ,lambdas, forward=False):
     '''
@@ -81,7 +88,7 @@ def design_matrix(eeg, feat, tlag, cmplx=True, forward=False, normalize=True):
     - Y_list - speech signal features (envelope, fundamental waveform etc.).
     List of numpy arrays with shape [T x 1],
     where T - number of samples (the same as in EEG).
-    - tlag - timelag range to consider in samples. Two element list.
+    - tlag - timelag range to consider in samples. Two element list. <- change to seconds...
     [-100, 400] means one does want to consider timelags of -100 ms and 400 ms
     for 1kHz sampling rate.
     - complex - boolean. True if complex model is considered and coeff will have
@@ -117,7 +124,7 @@ def design_matrix(eeg, feat, tlag, cmplx=True, forward=False, normalize=True):
     # Apply hilbert transform to EEG data (if backward model)
     # or speech feature (if forward model)
     if cmplx:
-        eeg = utils.fast_hilbert(eeg, axis=0)
+        eeg = utils.fast_hilbert(eeg, axis=0) # <- move outside? + change to SciPy
 
     # Preallocate memory for the design matrix X
     X = np.zeros((Y.shape[0], int(lag_width*eeg.shape[1])), dtype=eeg.dtype)
@@ -161,6 +168,12 @@ def get_cov_mat(eeg_list, feat_list, tlag, cmplx=True, forward=False, normalize=
     -XtX, XtY - covariance matrices XtX, XtY
     '''
     
+    if not isinstance(eeg_list, list):
+        eeg_list = [eeg_list]
+        
+    if not isinstance(feat_list, list):
+        feat_list = [feat_list]
+
     assert len(eeg_list) == len(feat_list)
     assert len(tlag) == 2
     

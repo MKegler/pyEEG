@@ -21,7 +21,6 @@ import logging
 import numpy as np
 from scipy import stats
 from sklearn.model_selection import KFold
-from sklearn.preprocessing import normalize as skl_norm
 import matplotlib.pyplot as plt
 from mne.decoding import BaseEstimator
 from .utils import lag_matrix, lag_span, lag_sparse, mem_check
@@ -87,11 +86,15 @@ def _svd_regress(x, y, alpha=0.):
     # each slice being a diagonal matrix of s/(s**2+lambda)
     
     eigenvals_scaled = np.zeros((*V.shape, np.size(alpha)))
+
+    # eigenvals_scaled[range(len(V)), range(len(V)), :] = np.repeat(s[:, None], np.size(alpha), axis=1) / \ <- missing normalization of regularization param?
+    # (np.repeat(s[:, None]**2, np.size(alpha), axis=1) + np.repeat(alpha[:, None].T, len(s), axis=0))
+
+    # With normalized regularization.
     eigenvals_scaled[range(len(V)), range(len(V)), :] = np.repeat(s[:, None], np.size(alpha), axis=1) / \
-    (np.repeat(s[:, None]**2, np.size(alpha), axis=1) + np.repeat(alpha[:, None].T, len(s), axis=0))
+    (np.repeat(s[:, None]**2, np.size(alpha), axis=1) + np.mean(s**2)*np.repeat(alpha[:, None].T, len(s), axis=0))
 
     # A dot product instead of matmul allows to repeat multiplication alike across third dimension (alphas)
-    
     Vsreg = np.dot(V.T, eigenvals_scaled) #np.diag(s/(s**2 + alpha))
     
     # Using einsum to control which access get multiplied, again leaving alpha's dimension "untouched"
@@ -100,16 +103,25 @@ def _svd_regress(x, y, alpha=0.):
 
 
 def _get_covmat(x,y):
+    '''
+    
+    '''
     return np.dot(x.T,y)
 
 
-def _svd_regress2(x, y, alpha=0.):
-    
+def _svd_regress2(x, y, alpha=0., from_cov=False):
+    '''
+    Classic implementation that's quite fast. Based on the Octave's original code.
+    '''
     # Compute covariance matrices
-    XtX = _get_covmat(x,x)
-    XtY = _get_covmat(x,y)
+    if not from_cov:
+        XtX = _get_covmat(x,x)
+        XtY = _get_covmat(x,y)
+    else:
+        XtX = x[:]
+        XtY = y[:]
 
-    # cast alpha in ndarray
+    # Cast alpha in ndarray
     if isinstance(alpha, float):
         alpha = np.asarray([alpha])
     else:
@@ -167,8 +179,6 @@ class TRFEstimator(BaseEstimator):
         Whether ot not the Ridge regularisation is used to compute the TRF
     fit_intercept : bool
         Whether a column of ones should be added to the design matrix to fit an intercept
-    normalize : bool (default: False)
-        Normalize input features for for ridge regression. (unit vector normalization when using _svd or z-score when using _svd2 -> exactly the same results)
     fitted : bool
         True once the TRF has been fitted on EEG data
     intercept_ : 1d array (nchans, )
@@ -198,8 +208,7 @@ class TRFEstimator(BaseEstimator):
     >>> trf.fit(x, y, lagged=False)
     """
 
-    def __init__(self, times=(0.,), tmin=None, tmax=None, srate=1.,
-                 alpha=0., fit_intercept=True, normalize=False):
+    def __init__(self, times=(0.,), tmin=None, tmax=None, srate=1., alpha=0., fit_intercept=True):
 
         # if tmin and tmax:
         #     LOGGER.info("Will use lags spanning form tmin to tmax.\nTo use individual lags, use the `times` argument...")
@@ -215,7 +224,6 @@ class TRFEstimator(BaseEstimator):
         self.times = times
         self.srate = srate
         self.alpha = alpha
-        self.normalize = normalize # Should be declared here to automatically apply the same pre-processing for prediction. Maybe fitting a normalizer would be even better?
         if np.ndim(alpha) == 0:
             self.use_regularisation = alpha > 0.
         else:
@@ -228,7 +236,7 @@ class TRFEstimator(BaseEstimator):
         self.intercept_ = None
         self.coef_ = None
         self.n_feats_ = None
-        self.rotations_ = None # matrices to be used to rotate coefficients into a 'better conditonned subspace'
+        self.rotations_ = None # matrices to be used to rotate coefficients into a 'better conditioned subspace'
         self.n_chans_ = None
         self.feat_names_ = None
         self.valid_samples_ = None
@@ -286,9 +294,12 @@ class TRFEstimator(BaseEstimator):
         coef_ : ndarray (alphas x nlags x nfeats)
         intercept_ : ndarray (nfeats x 1)
         """
+
         self.fill_lags()
 
+        X = np.asarray(X)
         y = np.asarray(y)
+
         y_memory = sum([yy.nbytes for yy in y]) if np.ndim(y) == 3 else y.nbytes
         estimated_mem_usage = X.nbytes * (len(self.lags) if not lagged else 1) + y_memory
         if estimated_mem_usage/1024.**3 > mem_check():
@@ -296,6 +307,7 @@ class TRFEstimator(BaseEstimator):
 
         self.n_feats_ = X.shape[1] if not lagged else X.shape[1] // len(self.lags)
         self.n_chans_ = y.shape[1] if y.ndim == 2 else y.shape[2]
+        
         if feat_names:
             err_msg = "Length of feature names does not match number of columns from feature matrix"
             if lagged:
@@ -319,7 +331,7 @@ class TRFEstimator(BaseEstimator):
         #else: # simply do the dropping assuming it hasn't been done when default values are supplied
         #    X = X[self.valid_samples_, :]
 
-        '''
+        ''' # < ???
         if not lagged:
             if drop:
                 X = lag_matrix(X, lag_samples=self.lags, drop_missing=True)
@@ -335,30 +347,22 @@ class TRFEstimator(BaseEstimator):
                 X = lag_matrix(X, lag_samples=self.lags, filling=0.)
         '''
 
-        # Normalize features to unit vector (if normalization == True)
-        '''
-        Todo -> replace this with Normalizer and Scaler from SKlearn
-        '''
-        if self.normalize and (method == 'svd'):
-            X = skl_norm(X, axis=0)
-            y = skl_norm(y, axis=0)
-        elif self.normalize and (method == 'svd2'):
-            X = stats.zscore(X, axis=0)
-            y = stats.zscore(y, axis=0)
-
         # Adding intercept feature:
         if self.fit_intercept:
             X = np.hstack([np.ones((len(X), 1)), X])
 
         # Solving with svd or least square:
-        if self.use_regularisation or np.ndim(y) == 3:
+        if self.use_regularisation or np.ndim(y) == 3: # <- Using alpha = 0 instead of a whole new method for regular lsq
             # svd method:
             # betas = _svd_regress(X, y, self.alpha)[..., 0] # <- take the first alpha only? Does it make sense?
+
+            # svd method:
             if method == 'svd':
                 betas = _svd_regress(X, y, self.alpha)
+        
+            # svd2 method (from covariance matrices)
             elif method == 'svd2':
                 betas = _svd_regress2(X, y, self.alpha)
-
         else:
             betas, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
 
@@ -383,6 +387,7 @@ class TRFEstimator(BaseEstimator):
         self.coef_ = self.coef_[::-1, :, :] # need to flip the first axis of array to get correct lag order
         self.fitted = True
 
+        # Stats (remove?)
         try:
             # Get t-statistic and p-vals if regularization is ommited
             if not self.use_regularisation:
@@ -407,6 +412,12 @@ class TRFEstimator(BaseEstimator):
             print("Couldn't compute statistics... ")
 
         return self
+
+    def get_cov(self, X, y, lagged=False, drop=True):
+        pass
+
+    def fit_from_cov(self, XtX, XtY, ):
+        pass
 
     def xfit(self, X, y, n_splits=5, lagged=False, drop=True, feat_names=(), plot=False, verbose=False):
         """Apply a cross-validation procedure to find the best regularisation parameters
@@ -676,7 +687,7 @@ class TRFEstimator(BaseEstimator):
             features : %s
         )
         """%(self.alpha, self.fit_intercept, self.srate, self.tmin, self.tmax,
-             self.n_feats_, self.n_chans_, len(self.lags) if self.lags else None, str(self.feat_names_))
+             self.n_feats_, self.n_chans_, len(self.lags) if self.lags is not None else None, str(self.feat_names_))
         return obj
 
     def __add__(self, other_trf):
