@@ -95,7 +95,7 @@ def design_matrix(eeg, feat, tlag, cmplx=True, forward=False, normalize=True):
 
     # eeg and feat need to have the same number of samples.
     assert eeg.shape[0] == feat.shape[0]
-    assert feat.shape[1] == 1
+    # assert feat.shape[1] == 1
     assert len(tlag) == 2
 
     lag_width = tlag[1] - tlag[0]

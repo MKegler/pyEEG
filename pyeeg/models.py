@@ -21,15 +21,17 @@ import logging
 import numpy as np
 from scipy import stats
 from sklearn.model_selection import KFold
-from sklearn.preprocessing import normalize
+from sklearn.preprocessing import normalize as skl_norm
 import matplotlib.pyplot as plt
 from mne.decoding import BaseEstimator
 from .utils import lag_matrix, lag_span, lag_sparse, mem_check
 from .vizu import get_spatial_colors
+from scipy import linalg
 
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
 logging.basicConfig(level=logging.WARNING)
 LOGGER = logging.getLogger(__name__.split('.')[0])
+
 
 def _svd_regress(x, y, alpha=0.):
     """Linear regression using svd.
@@ -82,15 +84,12 @@ def _svd_regress(x, y, alpha=0.):
         Uty = U.T @ y
     
     # Cast all alpha (regularization param) in a 3D matrix,
-    # each slice being a diagonal matrix of s/(s**2+lambda) <- Shouldn't it be s**2/(s**2 + alpha)? Otherwise alpha has ver little effect?
+    # each slice being a diagonal matrix of s/(s**2+lambda)
     
     eigenvals_scaled = np.zeros((*V.shape, np.size(alpha)))
-    # eigenvals_scaled[range(len(V)), range(len(V)), :] = np.repeat(s[:, None], np.size(alpha), axis=1) / \
-    # (np.repeat(s[:, None]**2, np.size(alpha), axis=1) + np.repeat(alpha[:, None].T, len(s), axis=0))
-    
     eigenvals_scaled[range(len(V)), range(len(V)), :] = np.repeat(s[:, None], np.size(alpha), axis=1) / \
     (np.repeat(s[:, None]**2, np.size(alpha), axis=1) + np.repeat(alpha[:, None].T, len(s), axis=0))
-    
+
     # A dot product instead of matmul allows to repeat multiplication alike across third dimension (alphas)
     
     Vsreg = np.dot(V.T, eigenvals_scaled) #np.diag(s/(s**2 + alpha))
@@ -98,6 +97,52 @@ def _svd_regress(x, y, alpha=0.):
     # Using einsum to control which access get multiplied, again leaving alpha's dimension "untouched"
     betas = np.einsum('...jk, jl -> ...lk', Vsreg, Uty) #Vsreg @ Uty
     return betas
+
+
+def _get_covmat(x,y):
+    return np.dot(x.T,y)
+
+
+def _svd_regress2(x, y, alpha=0.):
+    
+    # Compute covariance matrices
+    XtX = _get_covmat(x,x)
+    XtY = _get_covmat(x,y)
+
+    # cast alpha in ndarray
+    if isinstance(alpha, float):
+        alpha = np.asarray([alpha])
+    else:
+        alpha = np.asarray(alpha)
+
+    # Compute eigenvalues and eigenvectors of covariance matrix XtX
+    S, V = linalg.eigh(XtX, overwrite_a=False, turbo=True)
+
+    # Sort the eigenvalues
+    s_ind = np.argsort(S)[::-1]
+    S = S[s_ind]
+    V = V[:, s_ind]
+
+    # Pick eigenvalues close to zero, remove them and corresponding eigenvectors
+    # and compute the average
+    tol = np.finfo(float).eps
+    r = sum(S > tol)
+    S = S[0:r]
+    V = V[:, 0:r]
+    nl = np.mean(S)
+
+    # Compute z
+    z = np.dot(V.T,XtY)
+
+    # Initialize empty list to store coefficient for different regularization parameters
+    coeff = []
+
+    # Compute coefficients for different regularization parameters
+    for l in alpha:
+        coeff.append(np.dot(V, (z/(S[:, np.newaxis] + nl*l))))
+
+    return np.stack(coeff, axis=-1)
+
 
 class TRFEstimator(BaseEstimator):
     """Temporal Response Function (TRF) Estimator Class.
@@ -122,6 +167,8 @@ class TRFEstimator(BaseEstimator):
         Whether ot not the Ridge regularisation is used to compute the TRF
     fit_intercept : bool
         Whether a column of ones should be added to the design matrix to fit an intercept
+    normalize : bool (default: False)
+        Normalize input features for for ridge regression. (unit vector normalization when using _svd or z-score when using _svd2 -> exactly the same results)
     fitted : bool
         True once the TRF has been fitted on EEG data
     intercept_ : 1d array (nchans, )
@@ -152,7 +199,7 @@ class TRFEstimator(BaseEstimator):
     """
 
     def __init__(self, times=(0.,), tmin=None, tmax=None, srate=1.,
-                 alpha=0., fit_intercept=True):
+                 alpha=0., fit_intercept=True, normalize=False):
 
         # if tmin and tmax:
         #     LOGGER.info("Will use lags spanning form tmin to tmax.\nTo use individual lags, use the `times` argument...")
@@ -168,6 +215,7 @@ class TRFEstimator(BaseEstimator):
         self.times = times
         self.srate = srate
         self.alpha = alpha
+        self.normalize = normalize # Should be declared here to automatically apply the same pre-processing for prediction. Maybe fitting a normalizer would be even better?
         if np.ndim(alpha) == 0:
             self.use_regularisation = alpha > 0.
         else:
@@ -175,6 +223,7 @@ class TRFEstimator(BaseEstimator):
         self.fit_intercept = fit_intercept
         self.fitted = False
         self.lags = None
+ 
         # All following attributes are only defined once fitted (hence the "_" suffix)
         self.intercept_ = None
         self.coef_ = None
@@ -186,6 +235,7 @@ class TRFEstimator(BaseEstimator):
         # The two following are only defined if simple least-square (no reg.) is used
         self.tvals_ = None
         self.pvals_ = None
+
 
     def fill_lags(self):
         """Fill the lags attributes.
@@ -206,7 +256,7 @@ class TRFEstimator(BaseEstimator):
             self.lags = lag_sparse(self.times, self.srate)[::-1]
         
 
-    def fit(self, X, y, lagged=False, drop=True, feat_names=(), rotations=(), normalization=False):
+    def fit(self, X, y, lagged=False, drop=True, feat_names=(), rotations=(), method='svd'):
         """Fit the TRF model.
 
         Parameters
@@ -226,8 +276,10 @@ class TRFEstimator(BaseEstimator):
         rotations : list of ndarrays (shape (nlag x nlags))
             List of rotation matrices (if ``V`` is one such rotation, ``V @ V.T`` is a projection).
             Can use empty item in place of identity matrix.
-        normalization : bool (default: False)
-            Normalize input features for ridge regression to unit vector. (reproduced SKlearn Ridge implementation)
+        method : string {svd | svd2}
+            Choice of fitting method. 
+            svd -> _svd_regress - default implementation by Hugo
+            svd2 -> _svd_regress2 - Miko's implementation used for ABRs (2x faster?)
 
         Returns
         -------
@@ -266,6 +318,7 @@ class TRFEstimator(BaseEstimator):
             X = lag_matrix(X, lag_samples=self.lags, drop_missing=drop, filling=np.nan if drop else 0.)
         #else: # simply do the dropping assuming it hasn't been done when default values are supplied
         #    X = X[self.valid_samples_, :]
+
         '''
         if not lagged:
             if drop:
@@ -281,20 +334,31 @@ class TRFEstimator(BaseEstimator):
             else:
                 X = lag_matrix(X, lag_samples=self.lags, filling=0.)
         '''
+
+        # Normalize features to unit vector (if normalization == True)
+        '''
+        Todo -> replace this with Normalizer and Scaler from SKlearn
+        '''
+        if self.normalize and (method == 'svd'):
+            X = skl_norm(X, axis=0)
+            y = skl_norm(y, axis=0)
+        elif self.normalize and (method == 'svd2'):
+            X = stats.zscore(X, axis=0)
+            y = stats.zscore(y, axis=0)
+
         # Adding intercept feature:
         if self.fit_intercept:
             X = np.hstack([np.ones((len(X), 1)), X])
-
-        # Normalize features to unit vector (if normalization == True)
-        if normalization:
-            X = normalize(X, axis=0)
-            y = normalize(y, axis=0)
 
         # Solving with svd or least square:
         if self.use_regularisation or np.ndim(y) == 3:
             # svd method:
             # betas = _svd_regress(X, y, self.alpha)[..., 0] # <- take the first alpha only? Does it make sense?
-            betas = _svd_regress(X, y, self.alpha)
+            if method == 'svd':
+                betas = _svd_regress(X, y, self.alpha)
+            elif method == 'svd2':
+                betas = _svd_regress2(X, y, self.alpha)
+
         else:
             betas, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
 
@@ -507,7 +571,7 @@ class TRFEstimator(BaseEstimator):
             raise NotImplementedError("Only correlation score is valid for now...")
 
 
-    def plot(self, feat_id=None, ax=None, spatial_colors=False, info=None, **kwargs):
+    def plot(self, feat_id=None, alpha_id=None, ax=None, spatial_colors=False, info=None, **kwargs):
         """Plot the TRF of the feature requested as a *butterfly* plot.
 
         Parameters
@@ -603,16 +667,16 @@ class TRFEstimator(BaseEstimator):
         obj = """TRFEstimator(
             alpha=%s,
             fit_intercept=%s,
-            srate=%d,
-            tmin=%.2f
-            tmax=%.2f,
-            n_feats=%d,
-            n_chans=%d,
-            n_lags=%d,
+            srate=%s,
+            tmin=%s,
+            tmax=%s,
+            n_feats=%s,
+            n_chans=%s,
+            n_lags=%s,
             features : %s
         )
         """%(self.alpha, self.fit_intercept, self.srate, self.tmin, self.tmax,
-             self.n_feats_, self.n_chans_, len(self.lags), str(self.feat_names_))
+             self.n_feats_, self.n_chans_, len(self.lags) if self.lags else None, str(self.feat_names_))
         return obj
 
     def __add__(self, other_trf):
