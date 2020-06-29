@@ -8,7 +8,7 @@ pyEEG package for analyzing EEG with speech and word-level features.
 
 from __future__ import division, print_function, absolute_import
 from pkg_resources import get_distribution
-from . import cca, io, mcca, models, preprocess, utils, vizu
+from . import cca, io, mcca, models, models_Miko, preprocess, utils, vizu
 from .cTRF import cTRF, cTRF_utils
 
 # Suppressing annoying logging in IPython 7.15.0 (issues with parso?)
