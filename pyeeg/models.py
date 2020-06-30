@@ -21,16 +21,14 @@ import logging
 import numpy as np
 from scipy import stats
 from sklearn.model_selection import KFold
+logging.getLogger('matplotlib').setLevel(logging.WARNING)
 import matplotlib.pyplot as plt
 from mne.decoding import BaseEstimator
 from .utils import lag_matrix, lag_span, lag_sparse, mem_check
 from .vizu import get_spatial_colors
-from scipy import linalg
 
-logging.getLogger('matplotlib').setLevel(logging.WARNING)
 logging.basicConfig(level=logging.WARNING)
 LOGGER = logging.getLogger(__name__.split('.')[0])
-
 
 def _svd_regress(x, y, alpha=0.):
     """Linear regression using svd.
@@ -73,7 +71,6 @@ def _svd_regress(x, y, alpha=0.):
         raise ValueError
 
     [U, s, V] = np.linalg.svd(x, full_matrices=False)
-
     if np.ndim(y) == 3:
         Uty = np.zeros((U.shape[1], y.shape[2]))
         for Y in y:
@@ -81,80 +78,16 @@ def _svd_regress(x, y, alpha=0.):
         Uty /= len(y)
     else:
         Uty = U.T @ y
-    
     # Cast all alpha (regularization param) in a 3D matrix,
     # each slice being a diagonal matrix of s/(s**2+lambda)
-    
     eigenvals_scaled = np.zeros((*V.shape, np.size(alpha)))
-
-    # eigenvals_scaled[range(len(V)), range(len(V)), :] = np.repeat(s[:, None], np.size(alpha), axis=1) / \ <- missing normalization of regularization param?
-    # (np.repeat(s[:, None]**2, np.size(alpha), axis=1) + np.repeat(alpha[:, None].T, len(s), axis=0))
-
-    # With normalized regularization.
     eigenvals_scaled[range(len(V)), range(len(V)), :] = np.repeat(s[:, None], np.size(alpha), axis=1) / \
-    (np.repeat(s[:, None]**2, np.size(alpha), axis=1) + np.mean(s**2)*np.repeat(alpha[:, None].T, len(s), axis=0))
-
+        (np.repeat(s[:, None]**2, np.size(alpha), axis=1) + np.repeat(alpha[:, None].T, len(s), axis=0))
     # A dot product instead of matmul allows to repeat multiplication alike across third dimension (alphas)
     Vsreg = np.dot(V.T, eigenvals_scaled) #np.diag(s/(s**2 + alpha))
-    
     # Using einsum to control which access get multiplied, again leaving alpha's dimension "untouched"
     betas = np.einsum('...jk, jl -> ...lk', Vsreg, Uty) #Vsreg @ Uty
     return betas
-
-
-def _get_covmat(x,y):
-    '''
-    
-    '''
-    return np.dot(x.T,y)
-
-
-def _svd_regress2(x, y, alpha=0., from_cov=False):
-    '''
-    Classic implementation that's quite fast. Based on the Octave's original code.
-    '''
-    # Compute covariance matrices
-    if not from_cov:
-        XtX = _get_covmat(x,x)
-        XtY = _get_covmat(x,y)
-    else:
-        XtX = x[:]
-        XtY = y[:]
-
-    # Cast alpha in ndarray
-    if isinstance(alpha, float):
-        alpha = np.asarray([alpha])
-    else:
-        alpha = np.asarray(alpha)
-
-    # Compute eigenvalues and eigenvectors of covariance matrix XtX
-    S, V = linalg.eigh(XtX, overwrite_a=False, turbo=True)
-
-    # Sort the eigenvalues
-    s_ind = np.argsort(S)[::-1]
-    S = S[s_ind]
-    V = V[:, s_ind]
-
-    # Pick eigenvalues close to zero, remove them and corresponding eigenvectors
-    # and compute the average
-    tol = np.finfo(float).eps
-    r = sum(S > tol)
-    S = S[0:r]
-    V = V[:, 0:r]
-    nl = np.mean(S)
-
-    # Compute z
-    z = np.dot(V.T,XtY)
-
-    # Initialize empty list to store coefficient for different regularization parameters
-    coeff = []
-
-    # Compute coefficients for different regularization parameters
-    for l in alpha:
-        coeff.append(np.dot(V, (z/(S[:, np.newaxis] + nl*l))))
-
-    return np.stack(coeff, axis=-1)
-
 
 class TRFEstimator(BaseEstimator):
     """Temporal Response Function (TRF) Estimator Class.
@@ -208,7 +141,8 @@ class TRFEstimator(BaseEstimator):
     >>> trf.fit(x, y, lagged=False)
     """
 
-    def __init__(self, times=(0.,), tmin=None, tmax=None, srate=1., alpha=0., fit_intercept=True, mtype='Forward'):
+    def __init__(self, times=(0.,), tmin=None, tmax=None, srate=1.,
+                 alpha=0., fit_intercept=True):
 
         # if tmin and tmax:
         #     LOGGER.info("Will use lags spanning form tmin to tmax.\nTo use individual lags, use the `times` argument...")
@@ -224,7 +158,6 @@ class TRFEstimator(BaseEstimator):
         self.times = times
         self.srate = srate
         self.alpha = alpha
-        self.mtype = mtype
         if np.ndim(alpha) == 0:
             self.use_regularisation = alpha > 0.
         else:
@@ -232,19 +165,17 @@ class TRFEstimator(BaseEstimator):
         self.fit_intercept = fit_intercept
         self.fitted = False
         self.lags = None
- 
         # All following attributes are only defined once fitted (hence the "_" suffix)
         self.intercept_ = None
         self.coef_ = None
         self.n_feats_ = None
-        self.rotations_ = None # matrices to be used to rotate coefficients into a 'better conditioned subspace'
+        self.rotations_ = None # matrices to be used to rotate coefficients into a 'better conditonned subspace'
         self.n_chans_ = None
         self.feat_names_ = None
         self.valid_samples_ = None
         # The two following are only defined if simple least-square (no reg.) is used
         self.tvals_ = None
         self.pvals_ = None
-
 
     def fill_lags(self):
         """Fill the lags attributes.
@@ -265,7 +196,7 @@ class TRFEstimator(BaseEstimator):
             self.lags = lag_sparse(self.times, self.srate)[::-1]
         
 
-    def fit(self, X, y, lagged=False, drop=True, feat_names=(), rotations=(), method='svd2'):
+    def fit(self, X, y, lagged=False, drop=True, feat_names=(), rotations=()):
         """Fit the TRF model.
 
         Parameters
@@ -285,22 +216,15 @@ class TRFEstimator(BaseEstimator):
         rotations : list of ndarrays (shape (nlag x nlags))
             List of rotation matrices (if ``V`` is one such rotation, ``V @ V.T`` is a projection).
             Can use empty item in place of identity matrix.
-        method : string {svd | svd2}
-            Choice of fitting method. 
-            svd -> _svd_regress - default implementation by Hugo
-            svd2 -> _svd_regress2 - Miko's implementation used for ABRs (2x faster?)
 
         Returns
         -------
-        coef_ : ndarray (alphas x nlags x nfeats)
+        coef_ : ndarray (nlags x nfeats)
         intercept_ : ndarray (nfeats x 1)
         """
-
         self.fill_lags()
 
-        X = np.asarray(X)
         y = np.asarray(y)
-
         y_memory = sum([yy.nbytes for yy in y]) if np.ndim(y) == 3 else y.nbytes
         estimated_mem_usage = X.nbytes * (len(self.lags) if not lagged else 1) + y_memory
         if estimated_mem_usage/1024.**3 > mem_check():
@@ -308,7 +232,6 @@ class TRFEstimator(BaseEstimator):
 
         self.n_feats_ = X.shape[1] if not lagged else X.shape[1] // len(self.lags)
         self.n_chans_ = y.shape[1] if y.ndim == 2 else y.shape[2]
-        
         if feat_names:
             err_msg = "Length of feature names does not match number of columns from feature matrix"
             if lagged:
@@ -331,8 +254,7 @@ class TRFEstimator(BaseEstimator):
             X = lag_matrix(X, lag_samples=self.lags, drop_missing=drop, filling=np.nan if drop else 0.)
         #else: # simply do the dropping assuming it hasn't been done when default values are supplied
         #    X = X[self.valid_samples_, :]
-
-        ''' # < ???
+        '''
         if not lagged:
             if drop:
                 X = lag_matrix(X, lag_samples=self.lags, drop_missing=True)
@@ -347,85 +269,55 @@ class TRFEstimator(BaseEstimator):
             else:
                 X = lag_matrix(X, lag_samples=self.lags, filling=0.)
         '''
-
         # Adding intercept feature:
         if self.fit_intercept:
             X = np.hstack([np.ones((len(X), 1)), X])
 
         # Solving with svd or least square:
-        if self.use_regularisation or np.ndim(y) == 3: # <- Using alpha = 0 instead of a whole new method for regular lsq
+        if self.use_regularisation or np.ndim(y) == 3:
             # svd method:
-            # betas = _svd_regress(X, y, self.alpha)[..., 0] # <- take the first alpha only? Does it make sense?
-
-            # svd method:
-            if method == 'svd':
-                self.coef_ = _svd_regress(X, y, self.alpha)
-        
-            # svd2 method (from covariance matrices)
-            elif method == 'svd2':
-                self.coef_ = _svd_regress2(X, y, self.alpha)
+            betas = _svd_regress(X, y, self.alpha)[..., 0]
         else:
-            self.coef_, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+            betas, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
 
         # Reshaping and getting coefficients
         if self.fit_intercept:
-            self.intercept_ = self.coef_[0, np.newaxis, :]
-            self.coef_ = self.coef_[1:, :]
+            self.intercept_ = betas[0, :]
+            betas = betas[1:, :]
 
-        # if rotations:
-        #     newbetas = np.zeros((len(self.lags) * self.n_feats_, self.n_chans_))
-        #     for _, rot in zip(range(self.n_feats_), rotations):
-        #         if not rot:
-        #             rot = np.eye(self.lags)
-        #         newbetas[::self.n_feats_, :] = rot @ betas[...]
-        #     betas = newbetas
+        if rotations:
+            newbetas = np.zeros((len(self.lags) * self.n_feats_, self.n_chans_))
+            for _, rot in zip(range(self.n_feats_), rotations):
+                if not rot:
+                    rot = np.eye(self.lags)
+                newbetas[::self.n_feats_, :] = rot @ betas[...]
+            betas = newbetas
 
+        self.coef_ = np.reshape(betas, (len(self.lags), self.n_feats_, self.n_chans_))
+        self.coef_ = self.coef_[::-1, :, :] # need to flip the first axis of array to get correct lag order
         self.fitted = True
 
-        # Stats (remove?)
-        try:
-            # Get t-statistic and p-vals if regularization is ommited
-            if not self.use_regularisation:
-                cov_betas = X.T @ X
-                # Compute variance sigma (MSE)
-                if np.ndim(y) == 3:
-                    dof = sum(list(map(len, y))) - (len(betas)+1+1) # 1 for mean, 1 for intercept (betas does not contains it)
-                    sigma = 0.
-                    for yy in y:
-                        sigma += np.sum((yy - self.predict(X))**2, axis=0)
-                    sigma /= dof
-                else:
-                    dof = len(y)-(len(betas)+1+1)
-                    sigma = np.sum((y - self.predict(X))**2, axis=0) / dof
-                # Covariance matrix on betas
-                #C = sigma * np.linalg.inv(cov_betas)
-                C = np.einsum('ij,k', np.linalg.inv(cov_betas), sigma)
-                # Actual stats
-                self.tvals_ = betas / np.sqrt(C.diagonal(axis1=0, axis2=1).swapaxes(0, 1)[1:, :])
-                self.pvals_ = 2 * (1-stats.t.cdf(abs(self.tvals), df=dof))
-        except:
-            print("Couldn't compute statistics... ")
+        # Get t-statistic and p-vals if regularization is ommited
+        if not self.use_regularisation:
+            cov_betas = X.T @ X
+            # Compute variance sigma (MSE)
+            if np.ndim(y) == 3:
+                dof = sum(list(map(len, y))) - (len(betas)+1+1) # 1 for mean, 1 for intercept (betas does not contains it)
+                sigma = 0.
+                for yy in y:
+                    sigma += np.sum((yy - self.predict(X))**2, axis=0)
+                sigma /= dof
+            else:
+                dof = len(y)-(len(betas)+1+1)
+                sigma = np.sum((y - self.predict(X))**2, axis=0) / dof
+            # Covariance matrix on betas
+            #C = sigma * np.linalg.inv(cov_betas)
+            C = np.einsum('ij,k', np.linalg.inv(cov_betas), sigma)
+            # Actual stats
+            self.tvals_ = betas / np.sqrt(C.diagonal(axis1=0, axis2=1).swapaxes(0, 1)[1:, :])
+            self.pvals_ = 2 * (1-stats.t.cdf(abs(self.tvals_), df=dof))
 
         return self
-
-    def get_coef(self):
-        if np.ndim(self.alpha) == 0:
-            betas = np.reshape(self.coef_, (len(self.lags), self.n_feats_, self.n_chans_))
-        else:
-            betas = np.reshape(self.coef_, (len(self.lags), self.n_feats_, self.n_chans_, len(self.alpha)))
-
-        if self.mtype == 'forward':
-            betas = betas[::-1,:]
-
-        return betas
-        
-        # self.coef_ = self.coef_[::-1, :, :] # need to flip the first axis of array to get correct lag order
-
-    def get_cov(self, X, y, lagged=False, drop=True):
-        pass
-
-    def fit_from_cov(self, XtX, XtY, ):
-        pass
 
     def xfit(self, X, y, n_splits=5, lagged=False, drop=True, feat_names=(), plot=False, verbose=False):
         """Apply a cross-validation procedure to find the best regularisation parameters
@@ -549,19 +441,10 @@ class TRFEstimator(BaseEstimator):
 
         """
         assert self.fitted, "Fit model first!"
-        # betas = np.reshape(self.coef_[::-1, :, :, :], (len(self.lags) * self.n_feats_, self.n_chans_))
-
-        # if np.ndim(self.alpha) == 0:
-        #     betas = np.reshape(self.coef_, (len(self.lags), self.n_feats_, self.n_chans_))
-        # else:
-        #     betas = np.reshape(self.coef_, (len(self.lags), self.n_feats_, self.n_chans_, len(self.alpha)))
-
-        # if self.mtype == 'forward':
-        #     betas = betas[::-1]
+        betas = np.reshape(self.coef_[::-1, :, :], (len(self.lags) * self.n_feats_, self.n_chans_))
 
         if self.fit_intercept:
-            # betas = np.r_[self.intercept_[:, None].T, self.coef_]
-            betas = np.concatenate((self.intercept_, self.coef_), axis=0)
+            betas = np.r_[self.intercept_[:, None].T, betas]
 
         # Check if input has been lagged already, if not, do it:
         if X.shape[1] != int(self.fit_intercept) + len(self.lags) * self.n_feats_:
@@ -570,11 +453,8 @@ class TRFEstimator(BaseEstimator):
             # Adding intercept feature:
             if self.fit_intercept:
                 X = np.hstack([np.ones((len(X), 1)), X])
-        
-        # Do it for every alpha?
-        pred = np.stack([X.dot(betas[:,:,i]) for i in range(betas.shape[-1])], axis=-1)
 
-        return pred # Shape T x Nchan x Alpha
+        return X.dot(betas)
 
     def score(self, Xtest, ytrue, scoring="corr"):
         """Compute a score of the model given true target and estimated target from Xtest.
@@ -602,7 +482,7 @@ class TRFEstimator(BaseEstimator):
             raise NotImplementedError("Only correlation score is valid for now...")
 
 
-    def plot(self, feat_id=None, alpha_id=None, ax=None, spatial_colors=False, info=None, **kwargs):
+    def plot(self, feat_id=None, ax=None, spatial_colors=False, info=None, **kwargs):
         """Plot the TRF of the feature requested as a *butterfly* plot.
 
         Parameters
@@ -698,16 +578,16 @@ class TRFEstimator(BaseEstimator):
         obj = """TRFEstimator(
             alpha=%s,
             fit_intercept=%s,
-            srate=%s,
-            tmin=%s,
-            tmax=%s,
-            n_feats=%s,
-            n_chans=%s,
-            n_lags=%s,
+            srate=%d,
+            tmin=%.2f
+            tmax=%.2f,
+            n_feats=%d,
+            n_chans=%d,
+            n_lags=%d,
             features : %s
         )
         """%(self.alpha, self.fit_intercept, self.srate, self.tmin, self.tmax,
-             self.n_feats_, self.n_chans_, len(self.lags) if self.lags is not None else None, str(self.feat_names_))
+             self.n_feats_, self.n_chans_, len(self.lags), str(self.feat_names_))
         return obj
 
     def __add__(self, other_trf):

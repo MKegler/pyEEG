@@ -1,21 +1,14 @@
 # -*- coding: utf-8 -*-
 # pylint: disable=invalid-name,wrong-import-position
 """
-In this module, we can find different method to model the relationship
-between stimulus and (EEG) response. Namely there are wrapper functions
-implementing:
+Custom functions and routines ported from cTRF package.
+Mainly focused on optimizing the runtime / memory consuption tradeoff for pitch tracking.
 
-    - Forward modelling (stimulus -> EEG), a.k.a _TRF_ (Temporal Response Functions)
-    - Backward modelling (EEG -> stimulus)
-    - CCA (in cca.py)
-    - ...
+Mikolaj Kegler (mikolaj.kegler16@imperial.ac.uk)
+June 2020
 
 TODO
-''''
-Maybe add DNN models, if so this should rather be a subpackage.
-Modules for each modelling architecture will then be implemented within the subpackage
-and we would have in `__init__.py` an entry to load all architectures.
-
+- Consolidate and integrate parts with the rest of the package
 """
 import logging
 import numpy as np
@@ -33,14 +26,30 @@ LOGGER = logging.getLogger(__name__.split('.')[0])
 
 def _get_covmat(x,y):
     '''
-    
+    Helper function for computing auto-correlation / covariance matrices.
     '''
     return np.dot(x.T,y)
 
 
 def _ridge_fit_SVD(x, y, alpha=[0.], from_cov=False):
     '''
-    Classic implementation that's quite fast. Based on the Octave's original code.
+    SVD-inspired fast implementation of the SVD fitting.
+    Note: When fitting the intercept, it's also penalized!
+          If on doesn't want that, simply use average for each channel of y to estimate intercept.
+    Parameters
+    ----------
+    X : ndarray (nsamples x nfeats) or autocorrelation matrix XtX (nfeats x nfeats) (if from_cov == True)
+    y : ndarray (nsamples x nchans) or covariance matrix XtY (nfeats x nchans) (if from_cov == True)
+    alpha : array-like.
+        Default: [0.].
+        List of regularization parameters.
+    from_cov : bool
+        Default: False.
+        Use covariance matrices XtX & XtY instead of raw x, y arrays.
+
+    Returns
+    -------
+    model_coef : ndarray (model_feats* x alphas) *-specific shape depends on the model
     '''
     # Compute covariance matrices
     if not from_cov:
@@ -86,10 +95,36 @@ def _ridge_fit_SVD(x, y, alpha=[0.], from_cov=False):
 
 
 def _corr_multifeat(yhat, ytrue, nchans):
+    '''
+    Helper functions for computing correlation coefficient (Pearson's r) for multiple channels at once.
+
+    Parameters
+    ----------
+    yhat : ndarray (T x nchan), estimate
+    ytrue : ndarray (T x nchan), reference
+    nchans : number of channels
+
+    Returns
+    -------
+    corr_coeffs : 1-D vector (nchan), correlation coefficient for each channel
+    '''
     return np.diag(np.corrcoef(x=yhat, y=ytrue, rowvar=False), k=nchans)
 
 
 def _rmse_multifeat(yhat, ytrue,axis=0):
+    '''
+    Helper functions for computing RMSE for multiple channels at once.
+
+    Parameters
+    ----------
+    yhat : ndarray (T x nchan), estimate
+    ytrue : ndarray (T x nchan), reference
+    axis : axis to compute the RMSE along
+
+    Returns
+    -------
+    rmses : 1-D vector (nchan), RMSE for each channel
+    '''
     return np.sqrt(np.mean((yhat-ytrue)**2, axis))    
 
 
@@ -112,8 +147,6 @@ class TRFEstimator(BaseEstimator):
         Array of `float`, corresponding to lag in seconds at which the TRF coefficients are computed
     srate : float
         Sampling rate
-    use_reularisation : bool
-        Whether ot not the Ridge regularisation is used to compute the TRF
     fit_intercept : bool
         Whether a column of ones should be added to the design matrix to fit an intercept
     fitted : bool
@@ -133,9 +166,17 @@ class TRFEstimator(BaseEstimator):
     -----
         - Attributes with a `_` suffix are only set once the TRF has been fitted on EEG data (i.e. after
         the method :meth:`TRFEstimator.fit` has been called).
+        
         - Can fit on a list of multiple dataset, where we have a list of target Y and
         a single stimulus matrix of features X, then the computation is made such that
         the coefficients computed are similar to those obtained by concatenating all matrices
+        
+        - Times reflect mismatch a -> b, where a - dependent, b - predicted
+        Negative timelags indicate a lagging behind b
+        Positive timelags indicate b lagging behind a
+        For example:
+        eeg -> env (tmin = -0.5, tmax = 0.1)
+        Indicate timeframe from -100 ms (eeg precedes stimulus): 500 ms (eeg after stimulus)
 
     Examples
     --------
@@ -145,7 +186,7 @@ class TRFEstimator(BaseEstimator):
     >>> trf.fit(x, y, lagged=False)
     """
 
-    def __init__(self, times=(0.,), tmin=None, tmax=None, srate=1., alpha=[0.], fit_intercept=True, mtype='Forward'):
+    def __init__(self, times=(0.,), tmin=None, tmax=None, srate=1., alpha=[0.], fit_intercept=False, mtype='Forward'):
 
         # Times reflect mismatch a -> b, where a - dependent, b - predicted
         # Negative timelags indicate a lagging behind b
@@ -158,7 +199,7 @@ class TRFEstimator(BaseEstimator):
         self.times = times
         self.srate = srate
         self.alpha = alpha
-        self.mtype = mtype # Forward or backward. Required for formatting coefficients in get_coef
+        self.mtype = mtype # Forward or backward. Required for formatting coefficients in get_coef (convention: forward - stimulus -> eeg, backward - eeg - stimulus)
         self.fit_intercept = fit_intercept
         self.fitted = False
         self.lags = None
@@ -170,8 +211,8 @@ class TRFEstimator(BaseEstimator):
         self.n_chans_ = None
         self.feat_names_ = None
         self.valid_samples_ = None
-        self.XtX_ = None
-        self.XtY_ = None
+        self.XtX_ = None # Autocorrelation matrix of feature X (thus XtX) -> used for computing model using fit_from_cov 
+        self.XtY_ = None # Covariance matrix of features X and Y (thus XtX) -> used for computing model using fit_from_cov 
 
 
     def fill_lags(self):
@@ -194,6 +235,28 @@ class TRFEstimator(BaseEstimator):
         
 
     def get_XY(self, X, y, lagged=False, drop=True, feat_names=()):
+        '''
+        Preprocess X and y before fitting (finding mapping between X -> y)
+
+        Parameters
+        ----------
+        X : ndarray (T x nfeat)
+        y : ndarray (T x nchan)
+        lagged : bool
+            Default: False.
+            Whether the X matrix has been previously 'lagged' (intercept still to be added).
+        drop : bool
+            Default: True.
+            Whether to drop non valid samples (if False, non valid sample are filled with 0.)
+        feat_names : list
+            Names of features being fitted. Must be of length ``nfeats``.
+
+        Returns
+        -------
+        Features preprocessed for fitting the model.
+        X : ndarray (T x nlags * nfeats)
+        y : ndarray (T x nchan)
+        '''
         self.fill_lags()
 
         X = np.asarray(X)
@@ -233,13 +296,12 @@ class TRFEstimator(BaseEstimator):
 
     def fit(self, X, y, lagged=False, drop=True, feat_names=()):
         """Fit the TRF model.
+        Mapping X -> y. Note the convention of timelags and type of model for seamless recovery of coefficients.
 
         Parameters
         ----------
         X : ndarray (nsamples x nfeats)
-            Array of features (time-lagged)
         y : ndarray (nsamples x nchans)
-            EEG data
         lagged : bool
             Default: False.
             Whether the X matrix has been previously 'lagged' (intercept still to be added).
@@ -248,10 +310,6 @@ class TRFEstimator(BaseEstimator):
             Whether to drop non valid samples (if False, non valid sample are filled with 0.)
         feat_names : list
             Names of features being fitted. Must be of length ``nfeats``.
-        method : string {svd | svd2}
-            Choice of fitting method. 
-            svd -> _svd_regress - default implementation by Hugo
-            svd2 -> _svd_regress2 - Miko's implementation used for ABRs (2x faster?)
 
         Returns
         -------
@@ -280,7 +338,11 @@ class TRFEstimator(BaseEstimator):
 
     def get_coef(self):
         '''
-        Format and return coefficients
+        Format and return coefficients. Note mtype attribute needs to be declared in the __init__.
+        
+        Returns
+        -------
+        coef_ : ndarray (nlags x nfeats x nchans x regularization params)
         '''
         if np.ndim(self.alpha) == 0:
             betas = np.reshape(self.coef_, (len(self.lags), self.n_feats_, self.n_chans_))
@@ -297,6 +359,24 @@ class TRFEstimator(BaseEstimator):
         '''
         Compute and add (with normalization factor) covariance matrices XtX, XtY
         For v. large population models when it's not possible to load all the data to memory at once.
+
+        Parameters
+        ----------
+        X : ndarray (nsamples x nfeats) or list/tuple of ndarray (from which the model will be computed)
+        y : ndarray (nsamples x nchans) or list/tuple of ndarray (from which the model will be computed)
+        lagged : bool
+            Default: False.
+            Whether the X matrix has been previously 'lagged' (intercept still to be added).
+        drop : bool
+            Default: True.
+            Whether to drop non valid samples (if False, non valid sample are filled with 0.)
+        n_parts : number of parts from which the covariance matrix are computed (required for normalization)
+            Default: 1
+
+        Returns
+        -------
+        XtX : autocorrelation matrix for X (accumulated)
+        XtY : covariance matrix for X & Y (accumulated)
         '''
         if isinstance(X, (list,tuple)) and n_parts > 1:
             assert len(X) == len(y)
@@ -328,8 +408,33 @@ class TRFEstimator(BaseEstimator):
 
     def fit_from_cov(self, X=None, y=None, lagged=False, drop=True, overwrite=True, part_length=150.):
         '''
-        Fit model from covariance matrices (handy for v. large data)
+        Fit model from covariance matrices (handy for v. large data).
+        Note: This method is intercept-agnostic. It's recommended to standardize the input data and avoid fitting intercept in the first place.
+        Otherwise, the intercept can be estimated as mean values for each channel of y.
+
+        Parameters
+        ----------
+        X : ndarray (nsamples x nfeats), if None, model will be fitted from accumulated XtX & XtY
+            Default: None
+        y : ndarray (nsamples x nchans), if None, model will be fitted from accumulated XtX & XtY
+            Default: None
+        lagged : bool
+            Default: False.
+            Whether the X matrix has been previously 'lagged' (intercept still to be added).
+        drop : bool
+            Default: True.
+            Whether to drop non valid samples (if False, non valid sample are filled with 0.)
+        overwrite : bool
+            Default: True
+            Whether to reset the accumulated covariance matrices (when X and Y are not None)
+        part_length : integer | float
+            Default: 150 (seconds) ~ 2.5 minutes. Estimate what will fit in RAM.
+            Size of the parts in which the data will be chopped for fitting the model (when X and Y are provided).
+        Returns
+        -------
+        coef_ : ndarray (alphas x nlags x nfeats)
         '''
+
         # If X and y are not none, chop them into pieces, compute cov matrices and fit the model (memory efficient)
         if (X is not None) and (y is not None):
             if overwrite:
@@ -434,12 +539,44 @@ class TRFEstimator(BaseEstimator):
             raise NotImplementedError("Only correlation score is valid for now...")
 
 
-    def xval_eval(self, X, y, n_splits=5, lagged=False, drop=True, train_full=True, verbose=True, segment_length=None, fit='direct'):
+    def xval_eval(self, X, y, n_splits=5, lagged=False, drop=True, train_full=True, scoring="corr", segment_length=None, fit_mode='direct', verbose=True):
         '''
-        Standard cross-validation
+        Standard cross-validation. Scoring
+
+        Parameters
+        ----------
+        X : ndarray (nsamples x nfeats)
+        y : ndarray (nsamples x nchans)
+        n_splits : integer (default: 5)
+            Number of folds
+        lagged : bool
+            Default: False.
+            Whether the X matrix has been previously 'lagged' (intercept still to be added).
+        drop : bool
+            Default: True.
+            Whether to drop non valid samples (if False, non valid sample are filled with 0.)
+        train_full : bool (default: True)
+            Train model using all the available data after the end of x-val
+        scoring : string (default: "corr")
+            Scoring method (see scoring())
+        segment_length: integer, float (default: None)
+            Length of a testing segments (that testing data will be chopped into). If None, use all the available data.
+        fit_mode : string {'direct' | 'from_cov_xxx'} (default: 'direct')
+            Model training mode. Options:
+            'direct' - fit using all the avaiable data at once (i.e. fit())
+            'from_cov_xxx' - fit using all the avaiable data from covariance matrices. 
+            The routine will chop data into pieces, compute piece-wise cov matrices and fit the model.
+            'xxx' portion of the string indicates the lenght of the segments that the data will be chopped into. 
+            If not declared (i.e. 'from_cov') the default 2.5 minutes will be used.
+        verbose : bool (defaul: True)
+
+        Returns
+        -------
+        scores - ndarray (n_splits x segments x nchans x alpha)
 
         ToDo:
-        - add standard scaler / normalizer
+        - implement standard scaler / normalizer (optional)
+        - handle different scores
         '''
 
         if np.ndim(self.alpha) < 1 or len(self.alpha) <= 1:
@@ -462,9 +599,15 @@ class TRFEstimator(BaseEstimator):
         for kfold, (train, test) in enumerate(kf.split(X)):
             if verbose: print("Training/Evaluating fold %d/%d"%(kfold+1, n_splits))
 
-            if fit == 'from_cov': # Fit using trick with adding covariance matrices -> saves RAM
-                self.fit_from_cov(X[train,:], y[train,:], overwrite=True, part_length=150.)
-            else: # Fit directly -> faster, but uses more RAM
+            if fit_mode.find('from_cov') > -1: # Fit using trick with adding covariance matrices -> saves RAM
+            # Format 'from_cov_xxx' -> xxx - duration of a single part. 
+            # The main idea is to chunk the data into bite-sized parts that will fit in the RAM
+                if len(fit_mode.split('_')) == 2:
+                    part_lenght = 150
+                elif len(fit_mode.split('_')) == 3:
+                    part_lenght = int(fit_mode.split('_')[-1])
+                self.fit_from_cov(X[train,:], y[train,:], overwrite=True, part_length=part_lenght)
+            else: # Fit directly -> slightly faster, but uses more RAM
                 self.fit(X[train,:], y[train,:])
 
             if segment_length: # Chop testing data into smaller pieces
@@ -487,75 +630,12 @@ class TRFEstimator(BaseEstimator):
 
         if train_full: 
             print("Fitting full model...")
-            if fit == 'from_cov': # Fit using trick with adding covariance matrices -> saves RAM
-                self.fit_from_cov(X, y, overwrite=True, part_length=150.)
+            if fit_mode.find('from_cov') > -1: # Fit using trick with adding covariance matrices -> saves RAM
+                self.fit_from_cov(X, y, overwrite=True, part_length=part_lenght)
             else:
                 self.fit(X, y)
 
         return scores
-
-
-### Obsolete?
-
-
-    def plot(self, feat_id=None, alpha_id=None, ax=None, spatial_colors=False, info=None, **kwargs):
-        """Plot the TRF of the feature requested as a *butterfly* plot.
-
-        Parameters
-        ----------
-        feat_id : list or int
-            Index of the feature requested or list of features.
-            Default is to use all features.
-        ax : array of axes (flatten)
-            list of subaxes
-        **kwargs : **dict
-            Parameters to pass to :func:`plt.subplots`
-
-        Returns
-        -------
-        fig : figure
-        """
-        if isinstance(feat_id, int):
-            feat_id = list(feat_id) # cast into list to be able to use min, len, etc...
-            if ax is not None:
-                fig = ax.figure
-        if not feat_id:
-            feat_id = range(self.n_feats_)
-        if len(feat_id) > 1:
-            if ax is not None:
-                fig = ax[0].figure
-        assert self.fitted, "Fit the model first!"
-        assert all([min(feat_id) >= 0, max(feat_id) < self.n_feats_]), "Feat ids not in range"
-
-        if ax is None:
-            if 'figsize' not in kwargs.keys():
-                fig, ax = plt.subplots(nrows=1, ncols=np.size(feat_id), figsize=(plt.rcParams['figure.figsize'][0] * np.size(feat_id), plt.rcParams['figure.figsize'][1]), **kwargs)
-            else:
-                fig, ax = plt.subplots(nrows=1, ncols=np.size(feat_id), **kwargs)
-
-        if spatial_colors:
-            assert info is not None, "To use spatial colouring, you must supply raw.info instance"
-            colors = get_spatial_colors(info)
-            
-        for k, feat in enumerate(feat_id):
-            if len(feat_id) == 1:
-                ax.plot(self.times, self.coef_[:, feat, :])
-                if self.feat_names_:
-                    ax.set_title('TRF for {:s}'.format(self.feat_names_[feat]))
-                if spatial_colors:
-                    lines = ax.get_lines()
-                    for kc, l in enumerate(lines):
-                        l.set_color(colors[kc])
-            else:
-                ax[k].plot(self.times, self.coef_[:, feat, :])
-                if self.feat_names_:
-                    ax[k].set_title('{:s}'.format(self.feat_names_[feat]))
-                if spatial_colors:
-                    lines = ax[k].get_lines()
-                    for kc, l in enumerate(lines):
-                        l.set_color(colors[kc])
-                        
-        return fig
 
 
     def __getitem__(self, feats):
@@ -623,3 +703,64 @@ class TRFEstimator(BaseEstimator):
         trf.lags = self.lags
 
         return trf
+
+    ### Obsolete?
+
+    def plot(self, feat_id=None, alpha_id=None, ax=None, spatial_colors=False, info=None, **kwargs):
+        """Plot the TRF of the feature requested as a *butterfly* plot.
+
+        Parameters
+        ----------
+        feat_id : list or int
+            Index of the feature requested or list of features.
+            Default is to use all features.
+        ax : array of axes (flatten)
+            list of subaxes
+        **kwargs : **dict
+            Parameters to pass to :func:`plt.subplots`
+
+        Returns
+        -------
+        fig : figure
+        """
+        if isinstance(feat_id, int):
+            feat_id = list(feat_id) # cast into list to be able to use min, len, etc...
+            if ax is not None:
+                fig = ax.figure
+        if not feat_id:
+            feat_id = range(self.n_feats_)
+        if len(feat_id) > 1:
+            if ax is not None:
+                fig = ax[0].figure
+        assert self.fitted, "Fit the model first!"
+        assert all([min(feat_id) >= 0, max(feat_id) < self.n_feats_]), "Feat ids not in range"
+
+        if ax is None:
+            if 'figsize' not in kwargs.keys():
+                fig, ax = plt.subplots(nrows=1, ncols=np.size(feat_id), figsize=(plt.rcParams['figure.figsize'][0] * np.size(feat_id), plt.rcParams['figure.figsize'][1]), **kwargs)
+            else:
+                fig, ax = plt.subplots(nrows=1, ncols=np.size(feat_id), **kwargs)
+
+        if spatial_colors:
+            assert info is not None, "To use spatial colouring, you must supply raw.info instance"
+            colors = get_spatial_colors(info)
+            
+        for k, feat in enumerate(feat_id):
+            if len(feat_id) == 1:
+                ax.plot(self.times, self.coef_[:, feat, :])
+                if self.feat_names_:
+                    ax.set_title('TRF for {:s}'.format(self.feat_names_[feat]))
+                if spatial_colors:
+                    lines = ax.get_lines()
+                    for kc, l in enumerate(lines):
+                        l.set_color(colors[kc])
+            else:
+                ax[k].plot(self.times, self.coef_[:, feat, :])
+                if self.feat_names_:
+                    ax[k].set_title('{:s}'.format(self.feat_names_[feat]))
+                if spatial_colors:
+                    lines = ax[k].get_lines()
+                    for kc, l in enumerate(lines):
+                        l.set_color(colors[kc])
+                        
+        return fig
