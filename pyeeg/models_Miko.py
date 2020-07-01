@@ -406,7 +406,7 @@ class TRFEstimator(BaseEstimator):
         return self
 
 
-    def fit_from_cov(self, X=None, y=None, lagged=False, drop=True, overwrite=True, part_length=150.):
+    def fit_from_cov(self, X=None, y=None, lagged=False, drop=True, overwrite=True, part_length=150., clear_after=True):
         '''
         Fit model from covariance matrices (handy for v. large data).
         Note: This method is intercept-agnostic. It's recommended to standardize the input data and avoid fitting intercept in the first place.
@@ -433,6 +433,10 @@ class TRFEstimator(BaseEstimator):
         Returns
         -------
         coef_ : ndarray (alphas x nlags x nfeats)
+
+
+        TODO:
+        - Introduce overlap between the segments to prevent losing data (minor, but it should yield exact results)
         '''
 
         # If X and y are not none, chop them into pieces, compute cov matrices and fit the model (memory efficient)
@@ -460,6 +464,10 @@ class TRFEstimator(BaseEstimator):
         self.intercept_ = None
         self.coef_ = _ridge_fit_SVD(self.XtX_, self.XtY_, self.alpha, from_cov=True)
         self.fitted = True
+
+        if clear_after:
+            self.clear_cov()
+
         return self
 
 
@@ -467,7 +475,7 @@ class TRFEstimator(BaseEstimator):
         '''
         Wipe clean / reset covariance matrices.
         '''
-        print("Clearing saved covariance matrices...")
+        # print("Clearing saved covariance matrices...")
         self.XtX_ = None
         self.XtY_ = None
         return self

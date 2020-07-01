@@ -212,6 +212,14 @@ def signal_envelope(signal, srate, cutoff=20., method='hilbert', comp_factor=1./
     else:
         return env
 
+
+def fundamental_waveform():
+    '''
+    Implement Anto's FW extraction method and filtering approximation (automate 'peak finding'?)
+    '''
+    pass
+
+
 def fir_order(tbw, srate, atten=60, ripples=None):
     """Estimate FIR Type II filter order (order will be odd).
 
