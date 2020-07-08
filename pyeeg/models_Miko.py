@@ -448,6 +448,7 @@ class TRFEstimator(BaseEstimator):
 
             assert X.shape[0] == y.shape[0]
 
+            ### ToDo -> add padding to the segment to spare some data...
             segments = [(part_length * i) + np.arange(part_length) for i in range(X.shape[0] // part_length)] # Indices making up segments
 
             if X.shape[0] % part_length > part_length/2:
@@ -637,7 +638,7 @@ class TRFEstimator(BaseEstimator):
             scores = np.asarray(scores)
 
         if train_full: 
-            print("Fitting full model...")
+            if verbose: print("Fitting full model...")
             if fit_mode.find('from_cov') > -1: # Fit using trick with adding covariance matrices -> saves RAM
                 self.fit_from_cov(X, y, overwrite=True, part_length=part_lenght)
             else:
