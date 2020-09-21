@@ -10,6 +10,7 @@ from __future__ import division, print_function, absolute_import
 from pkg_resources import get_distribution
 from . import cca, io, mcca, models, models_Miko, preprocess, utils, vizu
 from .cTRF import cTRF, cTRF_utils
+from . import meegkit
 
 # Suppressing annoying logging in IPython 7.15.0 (issues with parso?)
 # More details: https://github.com/ipython/ipython/issues/10946
