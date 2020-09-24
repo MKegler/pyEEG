@@ -186,7 +186,7 @@ class TRFEstimator(BaseEstimator):
     >>> trf.fit(x, y, lagged=False)
     """
 
-    def __init__(self, times=(0.,), tmin=None, tmax=None, srate=1., alpha=[0.], fit_intercept=False, mtype='Forward'):
+    def __init__(self, times=(0.,), tmin=None, tmax=None, srate=1., alpha=[0.], fit_intercept=False, mtype='forward'):
 
         # Times reflect mismatch a -> b, where a - dependent, b - predicted
         # Negative timelags indicate a lagging behind b
